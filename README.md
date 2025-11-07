@@ -13,13 +13,13 @@ Python 3.10 to 3.13
 If the python package is hosted on a repository, you can install directly using:
 
 ```sh
-pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.0#egg=neo_api_client"
+pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1#egg=neo_api_client"
 ```
 NOTE: For switching the version, try .git@[version number] in the above URL example .git@v1.0.0
 
 If you are updating your package please use below command to install
 ```sh
-pip install --force-reinstall "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.0#egg=neo_api_client"
+pip install --force-reinstall "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1#egg=neo_api_client"
 ```
 (you may need to run `pip` with root permission: `sudo pip install -e "`)
 
@@ -104,7 +104,7 @@ client.totp_validate(mpin="")
 
 # For exchange_segment cde_fo expected product=NRML, MIS. Add order_type=L, MKT, SL, SL-M.
 
-# product: Expected values are NRML, CNC, MIS, CO, BO
+# product: Expected values are NRML, CNC, MIS, CO, BO, MTF
 # price: scrip price
 # order_type: Expected values are L, MKT, SL, SL-M
 # quantity: The stock quantity(If suppose one lot size of a stock is 25, then in disclosed_quantity you have to pass 25 and not 1)
