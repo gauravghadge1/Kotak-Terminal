@@ -363,6 +363,94 @@ body {
     color: var(--text-muted);
 }
 
+/* Search Results */
+.search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-primary);
+    border-radius: var(--radius-md);
+    max-height: 250px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.search-box {
+    margin-bottom: var(--spacing-md);
+    position: relative;
+}
+
+.search-result-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--spacing-sm) var(--spacing-md);
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.search-result-item:hover {
+    background: var(--bg-hover);
+}
+
+.search-result-item.no-results {
+    color: var(--text-muted);
+    cursor: default;
+    justify-content: center;
+}
+
+.search-symbol {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.search-exchange {
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+}
+
+/* Watchlist Item Layout */
+.watchlist-info {
+    flex: 1;
+    cursor: pointer;
+}
+
+.watchlist-price {
+    text-align: right;
+    margin-right: var(--spacing-sm);
+}
+
+.watchlist-remove {
+    opacity: 0;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.watchlist-item:hover .watchlist-remove {
+    opacity: 1;
+}
+
+.watchlist-remove:hover {
+    background: var(--danger);
+    color: white;
+}
+
 /* Order Form */
 .order-form {
     display: flex;

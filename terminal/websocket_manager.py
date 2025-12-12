@@ -2,6 +2,7 @@
 
 import threading
 import json
+import time
 from typing import Optional, Dict, List, Callable, Any
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +10,10 @@ from collections import defaultdict
 
 from terminal.auth_manager import AuthManager
 from terminal.config import Config
+
+# Module-level load time - resets on hot reload
+_MODULE_LOAD_TIME = time.time()
+print(f"[WebSocket] Module loaded at {_MODULE_LOAD_TIME}")
 
 
 @dataclass
@@ -101,8 +106,29 @@ class WebSocketManager:
         # Connection state
         self._is_connected = False
         self._is_order_feed_connected = False
+        self._sdk_callbacks_set = False
         
         self._initialized = True
+    
+    def _setup_sdk_callbacks(self):
+        """Set up callbacks on the NeoAPI client - must be done BEFORE subscribing"""
+        client = self._auth_manager.client
+        if not client:
+            return False
+        
+        if self._sdk_callbacks_set:
+            return True
+        
+        # Set callbacks on the NeoAPI client
+        # These are called by the SDK's internal __on_message, __on_error, etc.
+        client.on_message = self._on_message
+        client.on_error = self._on_error
+        client.on_open = self._on_open
+        client.on_close = self._on_close
+        
+        self._sdk_callbacks_set = True
+        print("[WebSocket] SDK callbacks registered")
+        return True
     
     @property
     def is_connected(self) -> bool:
@@ -141,14 +167,35 @@ class WebSocketManager:
             else:
                 data = message
             
-            # Determine message type
-            msg_type = data.get("name", "")
+            # DEBUG: Log all incoming messages
+            print(f"[WS MESSAGE] Received: {str(data)[:300]}")
             
-            if msg_type == "sf":  # Stock feed
+            # Handle nested format from Kotak WebSocket: {'type': 'stock_feed', 'data': [...]}
+            msg_type = data.get("type", "")
+            if msg_type == "stock_feed" and "data" in data:
+                # Process each item in the data array
+                for item in data.get("data", []):
+                    item_type = item.get("name", "")
+                    if item_type == "sf":  # Stock feed
+                        self._handle_stock_feed(item)
+                    elif item_type == "if":  # Index feed
+                        self._handle_index_feed(item)
+                    elif item_type == "dp":  # Depth feed
+                        self._handle_depth_feed(item)
+                    elif "ordSt" in item or "nOrdNo" in item:  # Order feed
+                        self._handle_order_feed(item)
+                    else:
+                        # Generic - treat as stock feed
+                        self._handle_stock_feed(item)
+                return
+            
+            # Handle flat/direct format (legacy support)
+            item_type = data.get("name", "")
+            if item_type == "sf":  # Stock feed
                 self._handle_stock_feed(data)
-            elif msg_type == "if":  # Index feed
+            elif item_type == "if":  # Index feed
                 self._handle_index_feed(data)
-            elif msg_type == "dp":  # Depth feed
+            elif item_type == "dp":  # Depth feed
                 self._handle_depth_feed(data)
             elif "ordSt" in data or "nOrdNo" in data:  # Order feed
                 self._handle_order_feed(data)
@@ -157,22 +204,26 @@ class WebSocketManager:
                 self._handle_stock_feed(data)
                 
         except Exception as e:
-            print(f"WebSocket message error: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"WebSocket message error: {e}", flush=True)
     
     def _on_error(self, error):
         """Handle WebSocket error"""
-        print(f"WebSocket error: {error}")
+        print(f"[WS ERROR] {error}")
         if self._on_connection_change:
             self._on_connection_change({"connected": False, "error": str(error)})
     
     def _on_open(self, message=None):
         """Handle WebSocket connection open"""
+        print(f"[WS OPEN] WebSocket connected! Message: {message}")
         self._is_connected = True
         if self._on_connection_change:
             self._on_connection_change({"connected": True, "message": "Connected"})
     
     def _on_close(self, message=None):
         """Handle WebSocket connection close"""
+        print(f"[WS CLOSE] WebSocket closed. Message: {message}")
         self._is_connected = False
         if self._on_connection_change:
             self._on_connection_change({"connected": False, "message": "Disconnected"})
@@ -181,6 +232,10 @@ class WebSocketManager:
         """Process stock/derivative feed data"""
         token = str(data.get("tk", ""))
         exchange = data.get("e", "")
+        
+        if not token or not exchange:
+            return
+            
         key = f"{token}_{exchange}"
         
         if key not in self._market_data:
@@ -193,27 +248,49 @@ class WebSocketManager:
         
         # Update fields from feed
         md.trading_symbol = data.get("ts", md.trading_symbol)
-        md.ltp = float(data.get("ltp", md.ltp))
-        md.last_traded_qty = int(data.get("ltq", md.last_traded_qty))
-        md.volume = int(data.get("v", md.volume))
-        md.open_price = float(data.get("op", md.open_price))
-        md.high_price = float(data.get("h", md.high_price))
-        md.low_price = float(data.get("lo", md.low_price))
-        md.close_price = float(data.get("c", md.close_price))
-        md.change = float(data.get("cng", md.change))
-        md.change_percent = float(data.get("nc", md.change_percent))
-        md.bid_price = float(data.get("bp", md.bid_price))
-        md.ask_price = float(data.get("sp", md.ask_price))
-        md.bid_qty = int(data.get("bq", md.bid_qty))
-        md.ask_qty = int(data.get("sq", md.ask_qty))
-        md.open_interest = int(data.get("oi", md.open_interest))
-        md.total_buy_qty = int(data.get("tbq", md.total_buy_qty))
-        md.total_sell_qty = int(data.get("tsq", md.total_sell_qty))
-        md.lower_circuit = float(data.get("lcl", md.lower_circuit))
-        md.upper_circuit = float(data.get("ucl", md.upper_circuit))
-        md.week_52_high = float(data.get("yh", md.week_52_high))
-        md.week_52_low = float(data.get("yl", md.week_52_low))
+        
+        # Get LTP - may be explicit or calculated from bid/ask
+        new_ltp = data.get("ltp")
+        bp = data.get("bp")
+        sp = data.get("sp")
+        
+        # DEBUG: Log what we found
+        if bp or sp or new_ltp:
+            print(f"[PRICE DEBUG] Token {token}: ltp={new_ltp}, bp={bp}, sp={sp}")
+        
+        if new_ltp:
+            md.ltp = float(new_ltp)
+        elif bp and sp:
+            md.ltp = (float(bp) + float(sp)) / 2
+        elif bp:
+            md.ltp = float(bp)
+        elif sp:
+            md.ltp = float(sp)
+        
+        md.last_traded_qty = int(data.get("ltq", md.last_traded_qty) or 0)
+        md.volume = int(data.get("v", md.volume) or 0)
+        md.open_price = float(data.get("op", md.open_price) or 0)
+        md.high_price = float(data.get("h", md.high_price) or 0)
+        md.low_price = float(data.get("lo", md.low_price) or 0)
+        md.close_price = float(data.get("c", md.close_price) or 0)
+        md.change = float(data.get("cng", md.change) or 0)
+        md.change_percent = float(data.get("nc", md.change_percent) or 0)
+        md.bid_price = float(data.get("bp", md.bid_price) or 0)
+        md.ask_price = float(data.get("sp", md.ask_price) or 0)
+        md.bid_qty = int(data.get("bq", md.bid_qty) or 0)
+        md.ask_qty = int(data.get("sq", md.ask_qty) or 0)
+        md.open_interest = int(data.get("oi", md.open_interest) or 0)
+        md.total_buy_qty = int(data.get("tbq", md.total_buy_qty) or 0)
+        md.total_sell_qty = int(data.get("tsq", md.total_sell_qty) or 0)
+        md.lower_circuit = float(data.get("lcl", md.lower_circuit) or 0)
+        md.upper_circuit = float(data.get("ucl", md.upper_circuit) or 0)
+        md.week_52_high = float(data.get("yh", md.week_52_high) or 0)
+        md.week_52_low = float(data.get("yl", md.week_52_low) or 0)
         md.last_update = datetime.now()
+        
+        # Debug: Log price updates
+        if md.ltp > 0:
+            print(f"[WebSocket] Price update: {token} ({exchange}) = Rs.{md.ltp:.2f}")
         
         # Notify callback
         if self._on_price_update:
@@ -245,9 +322,13 @@ class WebSocketManager:
             self._on_price_update(self._market_data_to_dict(md))
     
     def _handle_depth_feed(self, data: dict):
-        """Process market depth data"""
+        """Process market depth data - also updates market prices from depth"""
         token = str(data.get("tk", ""))
         exchange = data.get("e", "")
+        
+        if not token or not exchange:
+            return
+            
         key = f"{token}_{exchange}"
         
         if key not in self._market_depth:
@@ -265,9 +346,9 @@ class WebSocketManager:
         for i in range(5):
             suffix = str(i+1) if i > 0 else ""
             bid = DepthLevel(
-                price=float(data.get(f"bp{suffix}", 0)),
-                quantity=int(data.get(f"bq{suffix}", 0)),
-                orders=int(data.get(f"bno{i+1}", 0))
+                price=float(data.get(f"bp{suffix}", 0) or 0),
+                quantity=int(data.get(f"bq{suffix}", 0) or 0),
+                orders=int(data.get(f"bno{i+1}", 0) or 0)
             )
             depth.bids.append(bid)
         
@@ -276,14 +357,160 @@ class WebSocketManager:
         for i in range(5):
             suffix = str(i+1) if i > 0 else ""
             ask = DepthLevel(
-                price=float(data.get(f"sp{suffix}", 0)),
-                quantity=int(data.get(f"bs{suffix}", 0)),
-                orders=int(data.get(f"sno{i+1}", 0))
+                price=float(data.get(f"sp{suffix}", 0) or 0),
+                quantity=int(data.get(f"bs{suffix}", 0) or 0),
+                orders=int(data.get(f"sno{i+1}", 0) or 0)
             )
             depth.asks.append(ask)
         
         if self._on_depth_update:
             self._on_depth_update(self._market_depth_to_dict(depth))
+        
+        # ALSO update market data LTP from depth prices
+        # Get best bid/ask prices
+        bp = data.get("bp")
+        sp = data.get("sp")
+        
+        if bp or sp:
+            # Update market data with price from depth
+            if key not in self._market_data:
+                self._market_data[key] = MarketData(
+                    instrument_token=token,
+                    exchange_segment=exchange
+                )
+            
+            md = self._market_data[key]
+            md.trading_symbol = data.get("ts", md.trading_symbol)
+            
+            # Calculate LTP from best bid/ask
+            if bp and sp:
+                md.ltp = (float(bp) + float(sp)) / 2
+            elif bp:
+                md.ltp = float(bp)
+            elif sp:
+                md.ltp = float(sp)
+            
+            md.bid_price = float(bp) if bp else md.bid_price
+            md.ask_price = float(sp) if sp else md.ask_price
+            
+            # Lazy fetch close price if we don't have it
+            # Debug: Show close_price value
+            print(f"[DEBUG] Token {token}: close_price={md.close_price}, ltp={md.ltp}")
+            need_fetch = (md.close_price < 1 and md.ltp > 0)
+            print(f"[DEBUG] Token {token}: need_fetch={need_fetch}")
+            if need_fetch:
+                self._fetch_close_price_async(token, exchange, key)
+            
+            # Calculate change percent if we have close price
+            if md.close_price and md.close_price > 0 and md.ltp > 0:
+                md.change = md.ltp - md.close_price
+                md.change_percent = ((md.ltp - md.close_price) / md.close_price) * 100
+            
+            md.last_update = datetime.now()
+            
+            # DEBUG: Log price updates from depth
+            print(f"[DEPTH->PRICE] Token {token}: LTP=Rs.{md.ltp:.2f} Change={md.change_percent:.2f}%")
+            
+            # Emit price update
+            if self._on_price_update:
+                self._on_price_update(self._market_data_to_dict(md))
+    
+    def _fetch_close_price_async(self, token: str, exchange: str, key: str):
+        """Fetch close price for a token if not already fetched"""
+        # Check if we already have the close price
+        md = self._market_data.get(key)
+        if md and md.close_price > 0:
+            return  # Already have close price
+        
+        # Initialize fetch attempts if needed
+        if not hasattr(self, '_fetch_attempts'):
+            self._fetch_attempts = {}
+            
+        current_module_time = _MODULE_LOAD_TIME
+        now = time.time()
+        
+        # Get last attempt info: (timestamp, module_load_time)
+        # If it was just a timestamp (old format), treat as old module time
+        last_attempt_data = self._fetch_attempts.get(key)
+        
+        last_attempt_time = 0
+        last_attempt_module = 0
+        
+        if isinstance(last_attempt_data, (tuple, list)):
+            last_attempt_time, last_attempt_module = last_attempt_data
+        else:
+            last_attempt_time = last_attempt_data or 0
+            
+        print(f"[DEBUG-FETCH] Token={key} Module={current_module_time} LastMod={last_attempt_module} LastTime={last_attempt_time:.0f}")
+        
+        # If module reloaded, ignore previous attempts (force fetch)
+        if last_attempt_module != current_module_time:
+            print(f"[DEBUG-FETCH] Force fetch due to module reload")
+            pass # Force fetch
+        # Otherwise respect 60s cooldown
+        elif now - last_attempt_time < 60:
+            print(f"[DEBUG-FETCH] Rate limited: {now - last_attempt_time:.0f}s < 60s")
+            return
+            
+        # Record attempt with current module time
+        self._fetch_attempts[key] = (now, current_module_time)
+        print(f"[Quotes] Starting fetch thread for {key}...")
+        
+        # Fetch in background to not block
+        import threading
+        def fetch():
+            try:
+                client = self._auth_manager.client
+                if not client or not self._auth_manager.is_authenticated:
+                    return
+                
+                instrument_tokens = [{"instrument_token": token, "exchange_segment": exchange}]
+                print(f"[Quotes] Fetching close price for {token}...")
+                
+                result = client.quotes(instrument_tokens=instrument_tokens, quote_type="ohlc")
+                print(f"[Quotes] Raw result for {token}: {str(result)[:300]}")
+                
+                # Try to parse result
+                quotes = []
+                if isinstance(result, list):
+                    quotes = result
+                elif isinstance(result, dict):
+                    quotes = result.get('data', []) if isinstance(result.get('data'), list) else []
+                
+                for quote in quotes:
+                    # Handle nested OHLC object from API
+                    ohlc = quote.get('ohlc', {})
+                    if not isinstance(ohlc, dict):
+                        ohlc = {}
+                        
+                    # Try different field names based on API response format
+                    # Priority: ohlc.close -> quote.pClose -> quote.close -> quote.c
+                    close = float(ohlc.get('close') or quote.get('pClose') or quote.get('close') or quote.get('c') or 0)
+                    open_p = float(ohlc.get('open') or quote.get('pOpen') or quote.get('open') or quote.get('o') or 0)
+                    high = float(ohlc.get('high') or quote.get('pHigh') or quote.get('high') or quote.get('h') or 0)
+                    low = float(ohlc.get('low') or quote.get('pLow') or quote.get('low') or quote.get('l') or 0)
+                    
+                    if close > 0 and key in self._market_data:
+                        md = self._market_data[key]
+                        md.close_price = close
+                        md.open_price = open_p if open_p > 0 else md.open_price
+                        md.high_price = high if high > 0 else md.high_price
+                        md.low_price = low if low > 0 else md.low_price
+                        print(f"[Quotes] Token {token}: Close={close}")
+                        
+                        # Recalculate change with new close price
+                        if md.ltp > 0:
+                            md.change = md.ltp - md.close_price
+                            md.change_percent = ((md.ltp - md.close_price) / md.close_price) * 100
+                            # Emit updated price
+                            if self._on_price_update:
+                                self._on_price_update(self._market_data_to_dict(md))
+                        break
+                        
+            except Exception as e:
+                print(f"[Quotes] Error fetching: {e}")
+        
+        threading.Thread(target=fetch, daemon=True).start()
     
     def _handle_order_feed(self, data: dict):
         """Process order update feed"""
@@ -334,11 +561,10 @@ class WebSocketManager:
             return {"success": False, "error": "Not authenticated"}
         
         try:
-            # Set up callbacks
-            client.on_message = self._on_message
-            client.on_error = self._on_error
-            client.on_open = self._on_open
-            client.on_close = self._on_close
+            # Set up SDK callbacks BEFORE subscribing
+            self._setup_sdk_callbacks()
+            
+            print(f"[WebSocket] Subscribing to {len(instrument_tokens)} instruments: {instrument_tokens}")
             
             # Subscribe
             client.subscribe(
@@ -356,12 +582,66 @@ class WebSocketManager:
                 if is_index:
                     self._index_tokens.add(key)
             
+            # Fetch initial quotes to get close price for change calculation
+            try:
+                print(f"[Quotes] Fetching quotes for {len(instrument_tokens)} instruments...")
+                quotes_result = client.quotes(
+                    instrument_tokens=instrument_tokens,
+                    quote_type="ohlc"
+                )
+                print(f"[Quotes] Raw response type: {type(quotes_result)}")
+                print(f"[Quotes] Raw response: {str(quotes_result)[:500]}")
+                
+                if isinstance(quotes_result, list):
+                    for quote in quotes_result:
+                        token = str(quote.get('pSymbol', ''))
+                        exchange = quote.get('pExchSeg', '')
+                        key = f"{token}_{exchange}"
+                        
+                        if key not in self._market_data:
+                            self._market_data[key] = MarketData(
+                                instrument_token=token,
+                                exchange_segment=exchange
+                            )
+                        
+                        md = self._market_data[key]
+                        md.close_price = float(quote.get('pClose', 0) or 0)
+                        md.open_price = float(quote.get('pOpen', 0) or 0)
+                        md.high_price = float(quote.get('pHigh', 0) or 0)
+                        md.low_price = float(quote.get('pLow', 0) or 0)
+                        print(f"[Quotes] Token {token}: Close={md.close_price}")
+                elif isinstance(quotes_result, dict):
+                    # Maybe it's a dict with 'data' key
+                    data = quotes_result.get('data', [])
+                    print(f"[Quotes] Dict format, data length: {len(data) if isinstance(data, list) else 'N/A'}")
+                    for quote in data if isinstance(data, list) else []:
+                        token = str(quote.get('pSymbol', quote.get('instrument_token', '')))
+                        exchange = quote.get('pExchSeg', quote.get('exchange_segment', ''))
+                        key = f"{token}_{exchange}"
+                        
+                        if key not in self._market_data:
+                            self._market_data[key] = MarketData(
+                                instrument_token=token,
+                                exchange_segment=exchange
+                            )
+                        
+                        md = self._market_data[key]
+                        # Try different field names
+                        md.close_price = float(quote.get('pClose', quote.get('close', quote.get('c', 0))) or 0)
+                        md.open_price = float(quote.get('pOpen', quote.get('open', quote.get('o', 0))) or 0)
+                        md.high_price = float(quote.get('pHigh', quote.get('high', quote.get('h', 0))) or 0)
+                        md.low_price = float(quote.get('pLow', quote.get('low', quote.get('l', 0))) or 0)
+                        print(f"[Quotes] Token {token}: Close={md.close_price}")
+            except Exception as qe:
+                print(f"[Quotes] Error fetching quotes: {qe}")
+            
             return {
                 "success": True,
                 "subscribed_count": len(instrument_tokens),
                 "message": f"Subscribed to {len(instrument_tokens)} instruments"
             }
         except Exception as e:
+            print(f"[WebSocket] Subscribe error: {e}")
             return {"success": False, "error": str(e)}
     
     def unsubscribe(
@@ -404,10 +684,15 @@ class WebSocketManager:
             return {"success": False, "error": "Not authenticated"}
         
         try:
+            # Set up SDK callbacks BEFORE subscribing
+            self._setup_sdk_callbacks()
+            
             client.subscribe_to_orderfeed()
             self._is_order_feed_connected = True
+            print("[WebSocket] Subscribed to order feed")
             return {"success": True, "message": "Subscribed to order feed"}
         except Exception as e:
+            print(f"[WebSocket] Order feed subscribe error: {e}")
             return {"success": False, "error": str(e)}
     
     # ===== Data Access Methods =====

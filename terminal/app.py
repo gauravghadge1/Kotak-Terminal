@@ -4,6 +4,10 @@ from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 import os
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables from .env file in the same directory
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,13 +19,16 @@ from terminal.data_manager import DataManager
 from terminal.websocket_manager import WebSocketManager
 
 # Initialize Flask app
+
+# Force restart 2
 app = Flask(__name__, 
             static_folder='static',
             template_folder='templates')
 app.config['SECRET_KEY'] = Config.SECRET_KEY
 
 # Initialize SocketIO for real-time updates
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Use threading mode for background thread emission support
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Initialize managers
 auth_manager = AuthManager()
@@ -34,19 +41,20 @@ ws_manager = WebSocketManager()
 
 def on_price_update(data):
     """Broadcast price updates to connected clients"""
-    socketio.emit('price_update', data)
+    print(f"[Flask] Emitting price_update: {data.get('instrument_token')} LTP={data.get('ltp')}")
+    socketio.emit('price_update', data, namespace='/')
 
 def on_depth_update(data):
     """Broadcast depth updates to connected clients"""
-    socketio.emit('depth_update', data)
+    socketio.emit('depth_update', data, namespace='/')
 
 def on_order_update(data):
     """Broadcast order updates to connected clients"""
-    socketio.emit('order_update', data)
+    socketio.emit('order_update', data, namespace='/')
 
 def on_connection_change(data):
     """Broadcast connection status changes"""
-    socketio.emit('connection_status', data)
+    socketio.emit('connection_status', data, namespace='/')
 
 # Set callbacks
 ws_manager.set_callbacks(
@@ -76,6 +84,43 @@ def auth_status():
         **auth_manager.get_session_info(),
         "config_valid": Config.validate()
     })
+
+@app.route('/api/subscribe', methods=['POST'])
+def subscribe():
+    """Subscribe to market data"""
+    try:
+        data = request.json
+        tokens_to_subscribe = []
+        
+        # Check for direct tokens list (preferred)
+        if 'instrument_tokens' in data:
+            tokens_to_subscribe = data['instrument_tokens']
+            
+        # Check for script names (legacy/frontend Search dependent)
+        elif 'script_names' in data:
+            full_names = data['script_names']
+            print(f"[API] Subscribe request for names: {full_names}")
+            for script_name in full_names:
+                 if "(" in script_name and ")" in script_name:
+                    parts = script_name.split("(")
+                    token_part = parts[-1].replace(")", "").strip()
+                    tokens_to_subscribe.append({"instrument_token": token_part, "exchange_segment": "nse_cm"})
+        
+        if not tokens_to_subscribe:
+             return jsonify({"error": "No valid tokens or script names provided"}), 400
+
+        # Subscribe
+        print(f"[API] Subscribing to {len(tokens_to_subscribe)} tokens")
+        result = ws_manager.subscribe(
+            instrument_tokens=tokens_to_subscribe,
+            is_index=data.get('is_index', False),
+            is_depth=data.get('is_depth', False)
+        )
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"[API] Subscribe error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -207,6 +252,48 @@ def get_margin():
         transaction_type=data.get('transaction_type')
     )
     return jsonify(result)
+
+
+# ===== API Routes - Scrip Search =====
+
+@app.route('/api/search')
+def search_scrips():
+    """Search for scrips by symbol"""
+    query = request.args.get('q', '').strip().upper()
+    exchange = request.args.get('exchange', 'nse_cm')
+    
+    if not query or len(query) < 2:
+        return jsonify({"success": False, "error": "Query must be at least 2 characters"})
+    
+    client = auth_manager.client
+    if not client or not auth_manager.is_authenticated:
+        return jsonify({"success": False, "error": "Not authenticated"})
+    
+    try:
+        result = client.search_scrip(
+            exchange_segment=exchange,
+            symbol=query,
+            expiry="",
+            option_type="",
+            strike_price=""
+        )
+        
+        # Parse and simplify results
+        scrips = []
+        for item in result if isinstance(result, list) else []:
+            # Only include EQ (equity) group stocks
+            if item.get('pGroup') == 'EQ':
+                scrips.append({
+                    'token': str(item.get('pSymbol', '')),
+                    'symbol': item.get('pSymbolName', ''),
+                    'trading_symbol': item.get('pTrdSymbol', ''),
+                    'exchange': item.get('pExchSeg', exchange),
+                    'description': item.get('pDesc', '')
+                })
+        
+        return jsonify({"success": True, "data": scrips})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 
 # ===== API Routes - Live Data View (bypass paper mode) =====
@@ -346,16 +433,7 @@ def get_live_dashboard():
 
 # ===== API Routes - Market Data =====
 
-@app.route('/api/subscribe', methods=['POST'])
-def subscribe():
-    """Subscribe to market data"""
-    data = request.json
-    result = ws_manager.subscribe(
-        instrument_tokens=data.get('instrument_tokens', []),
-        is_index=data.get('is_index', False),
-        is_depth=data.get('is_depth', False)
-    )
-    return jsonify(result)
+
 
 @app.route('/api/unsubscribe', methods=['POST'])
 def unsubscribe():
@@ -479,7 +557,7 @@ def run_terminal(host=None, port=None, debug=None):
 +==============================================================+
     """)
     
-    socketio.run(app, host=host, port=port, debug=debug)
+    socketio.run(app, host=host, port=port, debug=debug, allow_unsafe_werkzeug=True)
 
 
 if __name__ == '__main__':

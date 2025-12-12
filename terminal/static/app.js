@@ -29,6 +29,7 @@ socket.on('disconnect', () => {
 });
 
 socket.on('price_update', (data) => {
+    console.log('[Socket.IO] price_update received:', data);
     updateWatchlistPrice(data);
     if (state.selectedSymbol === `${data.instrument_token}_${data.exchange_segment}`) {
         updatePriceInfo(data);
@@ -500,17 +501,37 @@ function renderWatchlist() {
     }
 
     container.innerHTML = state.watchlist.map(w => `
-        <div class="watchlist-item" data-key="${w.key}" onclick="selectSymbol('${w.token}', '${w.exchange}', '${w.symbol}')">
-            <div>
+        <div class="watchlist-item" data-key="${w.key}">
+            <div class="watchlist-info" onclick="selectSymbol('${w.token}', '${w.exchange}', '${w.symbol}')">
                 <div class="symbol">${w.symbol}</div>
                 <div class="exchange">${w.exchange.toUpperCase()}</div>
             </div>
-            <div style="text-align: right;">
+            <div class="watchlist-price">
                 <div class="price" data-price="0">₹0.00</div>
                 <div class="change">0.00%</div>
             </div>
+            <button class="watchlist-remove" onclick="removeFromWatchlist('${w.key}')" title="Remove">×</button>
         </div>
     `).join('');
+}
+
+// Remove from watchlist
+function removeFromWatchlist(key) {
+    const item = state.watchlist.find(w => w.key === key);
+    if (item) {
+        // Unsubscribe from market data
+        api('/api/unsubscribe', {
+            method: 'POST',
+            body: JSON.stringify({
+                instrument_tokens: [{ instrument_token: item.token, exchange_segment: item.exchange }]
+            })
+        });
+
+        // Remove from state
+        state.watchlist = state.watchlist.filter(w => w.key !== key);
+        renderWatchlist();
+        showToast(`${item.symbol} removed from watchlist`, 'info');
+    }
 }
 
 function selectSymbol(token, exchange, symbol) {
@@ -719,6 +740,9 @@ function setupLogin() {
                 // Subscribe to order feed
                 api('/api/subscribe/orderfeed', { method: 'POST' });
 
+                // Subscribe to watchlist market data
+                subscribeToWatchlist();
+
                 // Refresh all data
                 refreshAll();
             } else {
@@ -813,6 +837,100 @@ function addDemoWatchlist() {
         state.watchlist.push({ key: `${s.token}_${s.exchange}`, ...s });
     });
     renderWatchlist();
+
+    // Subscribe to market data for demo symbols after auth
+    // Use a small delay to ensure authentication is complete
+    setTimeout(() => {
+        if (state.authenticated) {
+            subscribeToWatchlist();
+        }
+    }, 2000);
+}
+
+// Subscribe all watchlist items to market data
+function subscribeToWatchlist() {
+    if (state.watchlist.length === 0) return;
+
+    const instrumentTokens = state.watchlist.map(w => ({
+        instrument_token: w.token,
+        exchange_segment: w.exchange
+    }));
+
+    api('/api/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({
+            instrument_tokens: instrumentTokens,
+            is_depth: true
+        })
+    }).then(result => {
+        if (result.success) {
+            console.log(`Subscribed to ${result.subscribed_count} instruments`);
+        } else {
+            console.error('Failed to subscribe:', result.error);
+        }
+    });
+}
+
+// ===== Search =====
+let searchTimeout = null;
+
+function setupSearch() {
+    const searchInput = document.getElementById('scrip-search');
+    const searchResults = document.getElementById('search-results');
+
+    searchInput.addEventListener('input', (e) => {
+        const query = e.target.value.trim();
+
+        // Clear previous timeout
+        if (searchTimeout) clearTimeout(searchTimeout);
+
+        if (query.length < 2) {
+            searchResults.style.display = 'none';
+            searchResults.innerHTML = '';
+            return;
+        }
+
+        // Debounce search
+        searchTimeout = setTimeout(() => {
+            api(`/api/search?q=${encodeURIComponent(query)}&exchange=nse_cm`)
+                .then(result => {
+                    if (result.success && result.data.length > 0) {
+                        searchResults.innerHTML = result.data.slice(0, 10).map(scrip => `
+                            <div class="search-result-item" onclick="addSearchResultToWatchlist('${scrip.token}', '${scrip.exchange}', '${scrip.symbol}')">
+                                <span class="search-symbol">${scrip.symbol}</span>
+                                <span class="search-exchange">${scrip.exchange.replace('_cm', '').toUpperCase()}</span>
+                            </div>
+                        `).join('');
+                        searchResults.style.display = 'block';
+                    } else {
+                        searchResults.innerHTML = '<div class="search-result-item no-results">No results found</div>';
+                        searchResults.style.display = 'block';
+                    }
+                })
+                .catch(err => {
+                    console.error('Search error:', err);
+                    searchResults.style.display = 'none';
+                });
+        }, 300);
+    });
+
+    // Hide search results when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.search-box')) {
+            searchResults.style.display = 'none';
+        }
+    });
+}
+
+function addSearchResultToWatchlist(token, exchange, symbol) {
+    const searchResults = document.getElementById('search-results');
+    const searchInput = document.getElementById('scrip-search');
+
+    searchResults.style.display = 'none';
+    searchInput.value = '';
+
+    addToWatchlist(token, exchange, symbol);
+    showToast(`${symbol} added to watchlist`, 'success');
 }
 
 // ===== Initialize =====
@@ -821,6 +939,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupLogin();
     setupTabs();
     setupLiveViewToggle();
+    setupSearch();
 
     checkAuth();
     addDemoWatchlist();
