@@ -1,0 +1,22 @@
+# Kotak Trading Terminal - Requirements
+
+# Core API Client
+# Already included in the repository
+
+# Web Framework
+flask>=2.3.0
+flask-socketio>=5.3.0
+
+# WebSocket support
+python-socketio>=5.10.0
+python-engineio>=4.8.0
+eventlet>=0.33.0
+
+# HTTP requests (if needed for additional features)
+requests>=2.31.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
+
+# For development
+watchdog>=3.0.0

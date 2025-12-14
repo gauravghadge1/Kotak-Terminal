@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kotak Trading Terminal</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+
+<body>
+    <!-- Live Data Warning Banner -->
+    <div id="live-banner" class="live-banner">
+        ⚠ VIEWING LIVE DATA - Real orders and positions from Kotak API ⚠
+    </div>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <h1 class="logo">
+                <span class="logo-icon">◈</span>
+                Kotak Terminal
+            </h1>
+            <span id="trading-mode" class="mode-badge paper">PAPER</span>
+        </div>
+        <div class="header-center">
+            <div class="summary-item">
+                <span class="label">Day P&L</span>
+                <span id="day-pnl" class="value positive">+₹0.00</span>
+            </div>
+            <div class="summary-item">
+                <span class="label">Positions</span>
+                <span id="positions-count" class="value">0</span>
+            </div>
+            <div class="summary-item">
+                <span class="label">Available</span>
+                <span id="available-margin" class="value">₹0.00</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="live-toggle-btn" class="live-toggle-btn" title="Toggle between paper and live data view">
+                <span class="dot"></span>
+                <span>View Live</span>
+            </button>
+            <div class="connection-status" id="ws-status">
+                <span class="status-dot disconnected"></span>
+                <span>Disconnected</span>
+            </div>
+            <button id="login-btn" class="btn btn-primary">Login</button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Left Panel: Watchlist & Order Entry -->
+        <aside class="left-panel">
+            <!-- Watchlist -->
+            <section class="panel watchlist-panel">
+                <div class="panel-header">
+                    <h2>Watchlist</h2>
+                    <button id="add-watchlist-btn" class="btn-icon">+</button>
+                </div>
+                <div class="search-box">
+                    <input type="text" id="scrip-search" placeholder="Search symbol...">
+                    <div id="search-results" class="search-results" style="display: none;">
+                        <!-- Search results will appear here -->
+                    </div>
+                </div>
+                <div id="watchlist" class="watchlist-items">
+                    <!-- Watchlist items will be added here -->
+                    <div class="empty-state">Add symbols to watchlist</div>
+                </div>
+            </section>
+
+            <!-- Quick Order -->
+            <section class="panel order-panel">
+                <div class="panel-header">
+                    <h2>Quick Order</h2>
+                </div>
+                <form id="order-form" class="order-form">
+                    <div class="form-row">
+                        <input type="text" id="order-symbol" placeholder="Symbol" class="input-full">
+                    </div>
+                    <div class="form-row txn-type">
+                        <button type="button" class="txn-btn buy active" data-type="B">BUY</button>
+                        <button type="button" class="txn-btn sell" data-type="S">SELL</button>
+                    </div>
+                    <div class="form-row two-col">
+                        <select id="order-exchange">
+                            <option value="nse_cm">NSE</option>
+                            <option value="bse_cm">BSE</option>
+                            <option value="nse_fo">NFO</option>
+                            <option value="bse_fo">BFO</option>
+                            <option value="mcx_fo">MCX</option>
+                        </select>
+                        <select id="order-product">
+                            <option value="MIS">MIS</option>
+                            <option value="CNC">CNC</option>
+                            <option value="NRML">NRML</option>
+                        </select>
+                    </div>
+                    <div class="form-row two-col">
+                        <input type="number" id="order-qty" placeholder="Qty" min="1">
+                        <input type="number" id="order-price" placeholder="Price" step="0.05">
+                    </div>
+                    <div class="form-row two-col">
+                        <select id="order-type">
+                            <option value="MKT">Market</option>
+                            <option value="L">Limit</option>
+                            <option value="SL">SL</option>
+                            <option value="SL-M">SL-M</option>
+                        </select>
+                        <input type="number" id="order-trigger" placeholder="Trigger" step="0.05" disabled>
+                    </div>
+                    <button type="submit" id="place-order-btn" class="btn btn-buy full-width">
+                        PLACE BUY ORDER
+                    </button>
+                </form>
+            </section>
+        </aside>
+
+        <!-- Center Panel: Orders & Positions -->
+        <section class="center-panel">
+            <!-- Tabs -->
+            <div class="tabs">
+                <button class="tab active" data-tab="orders">Orders</button>
+                <button class="tab" data-tab="positions">Positions</button>
+                <button class="tab" data-tab="holdings">Holdings</button>
+                <button class="tab" data-tab="trades">Trades</button>
+            </div>
+
+            <!-- Orders Tab -->
+            <div id="orders-tab" class="tab-content active">
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Type</th>
+                                <th>Qty</th>
+                                <th>Price</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="orders-table-body">
+                            <tr class="empty-row">
+                                <td colspan="7">No orders today</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Positions Tab -->
+            <div id="positions-tab" class="tab-content">
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Qty</th>
+                                <th>Avg Price</th>
+                                <th>LTP</th>
+                                <th>P&L</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-table-body">
+                            <tr class="empty-row">
+                                <td colspan="6">No open positions</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Holdings Tab -->
+            <div id="holdings-tab" class="tab-content">
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Qty</th>
+                                <th>Avg Cost</th>
+                                <th>LTP</th>
+                                <th>Current Value</th>
+                                <th>P&L</th>
+                            </tr>
+                        </thead>
+                        <tbody id="holdings-table-body">
+                            <tr class="empty-row">
+                                <td colspan="6">No holdings</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Trades Tab -->
+            <div id="trades-tab" class="tab-content">
+                <div class="data-table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Type</th>
+                                <th>Qty</th>
+                                <th>Price</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-table-body">
+                            <tr class="empty-row">
+                                <td colspan="6">No trades today</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Panel: Market Depth -->
+        <aside class="right-panel">
+            <section class="panel depth-panel">
+                <div class="panel-header">
+                    <h2>Market Depth</h2>
+                    <span id="depth-symbol" class="depth-symbol">-</span>
+                </div>
+                <div class="depth-header">
+                    <span>Bid</span>
+                    <span>Orders</span>
+                    <span>Qty</span>
+                    <span>Price</span>
+                    <span>Price</span>
+                    <span>Qty</span>
+                    <span>Orders</span>
+                    <span>Ask</span>
+                </div>
+                <div id="market-depth" class="depth-rows">
+                    <!-- Depth rows will be added here -->
+                </div>
+                <div class="depth-summary">
+                    <div class="summary-row">
+                        <span>Total Bid</span>
+                        <span id="total-bid-qty">0</span>
+                        <span id="total-ask-qty">0</span>
+                        <span>Total Ask</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Price Info -->
+            <section class="panel price-panel">
+                <div class="panel-header">
+                    <h2>Price Info</h2>
+                </div>
+                <div class="price-info-grid">
+                    <div class="info-item">
+                        <span class="label">Open</span>
+                        <span id="info-open" class="value">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">High</span>
+                        <span id="info-high" class="value">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Low</span>
+                        <span id="info-low" class="value">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Prev Close</span>
+                        <span id="info-close" class="value">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Volume</span>
+                        <span id="info-volume" class="value">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">OI</span>
+                        <span id="info-oi" class="value">-</span>
+                    </div>
+                </div>
+            </section>
+        </aside>
+    </main>
+
+    <!-- Login Modal -->
+    <div id="login-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Login to Kotak Neo</h2>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-info">Enter the TOTP from your authenticator app</p>
+                <input type="text" id="totp-input" placeholder="Enter 6-digit TOTP" maxlength="6" class="totp-input">
+                <button id="submit-login" class="btn btn-primary full-width">Login</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
